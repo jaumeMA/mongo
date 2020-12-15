@@ -283,6 +283,7 @@ Status dropCollection(OperationContext* opCtx,
                       const NamespaceString& collectionName,
                       BSONObjBuilder& result,
                       DropCollectionSystemCollectionMode systemCollectionMode) {
+
     if (!serverGlobalParams.quiet.load()) {
         LOGV2(518070, "CMD: drop", logAttrs(collectionName));
     }

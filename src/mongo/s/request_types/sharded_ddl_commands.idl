@@ -46,6 +46,24 @@ structs:
                 description: "Latest version of the collection"
                 optional: false
 
+    DropShardCollectionReply:
+        description: "The drop collection participant command's reply"
+        strict: false
+        fields:
+            dropped:
+                description: "Variable to check if collection has been dropped"
+                type: bool
+                optional: true
+            nss:
+                description: "Namespace of the removed collection"
+                type: namespacestring
+                optional: true
+            numIndexes:
+                description: "Number of indexes removed"
+                type: safeInt64
+                optional: true
+
+
 commands:
     _shardsvrDropDatabase:
         description: "Parser for the shardDropDatabase command"
@@ -60,8 +78,15 @@ commands:
         command_name: _shardsvrDropCollection
         namespace: concatenate_with_db
         cpp_name: ShardsvrDropCollection
-        strict: true
-        reply_type: DropDatabaseReply
+        strict: false
+
+    _shardsvrDropCollectionParticipant:
+        description: "Parser for the _shardsvrDropCollectionParticipant command"
+        command_name: _shardsvrDropCollectionParticipant
+        namespace: concatenate_with_db
+        cpp_name: ShardsvrDropCollectionParticipant
+        strict: false
+        reply_type: DropShardCollectionReply
 
     _shardsvrRenameCollection:
         command_name: _shardsvrRenameCollection

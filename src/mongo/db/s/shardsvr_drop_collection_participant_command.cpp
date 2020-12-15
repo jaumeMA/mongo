@@ -30,25 +30,26 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog/drop_collection.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/drop_database_gen.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/sharding_ddl_drop_collection.h"
-#include "mongo/db/s/sharding_ddl_operation.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/type_database.h"
-#include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/sharded_collections_ddl_parameters_gen.h"
 
 namespace mongo {
 namespace {
 
-class ShardsvrDropCollectionCommand final : public TypedCommand<ShardsvrDropCollectionCommand> {
+class ShardsvrDropCollectionParticipantCommand final
+    : public TypedCommand<ShardsvrDropCollectionParticipantCommand> {
 public:
     bool acceptsAnyApiVersionParameters() const override {
         return true;
@@ -59,45 +60,57 @@ public:
     }
 
     std::string help() const override {
-        return "Internal command, which is exported by the primary sharding server. Do not call "
-               "directly. Drops a collection.";
+        return "Internal command, which is exported by secondary sharding servers. Do not call "
+               "directly. Participates in droping a collection.";
     }
 
-    using Request = ShardsvrDropCollection;
+    using Request = ShardsvrDropCollectionParticipant;
+    using Response = DropShardCollectionReply;
 
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
 
-        void typedRun(OperationContext* opCtx) {
+        Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
-                    "_shardsvrDropCollection can only be run on primary shard servers",
+                    "_shardsvrDropCollectionParticipant can only be run on shard servers",
                     serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "_shardsvrDropCollectionParticipant must be called with "
+                                     "majority writeConcern, got "
+                                  << opCtx->getWriteConcern().wMode,
+                    opCtx->getWriteConcern().wMode == WriteConcernOptions::kMajority);
 
-            if (feature_flags::gShardingFullDDLSupport.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
-                try {
-                    auto dropCollectionOp =
-                        make_ddl_operation<ShardingDdlDropCollection>(opCtx, ns());
-                    auto dropCollFuture = dropCollectionOp.run(opCtx);
-
-                    dropCollFuture.get();
-                } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                    // If the DB isn't in the sharding catalog either, consider the drop a success.
-                }
-            } else {
-                auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-                auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
-                    opCtx,
-                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                    "admin",
-                    CommandHelpers::appendMajorityWriteConcern(
-                        BSON("_configsvrDropCollection" << ns().toString()),
-                        opCtx->getWriteConcern()),
-                    Shard::RetryPolicy::kIdempotent));
-
-                uassertStatusOK(cmdResponse.commandStatus);
+            // Check shard version
+            {
+                AutoGetCollection db(opCtx, ns(), MODE_IS);
+                auto* csr = CollectionShardingRuntime::get(opCtx, ns());
+                csr->checkShardVersionOrThrow(opCtx);
             }
+
+            BSONObjBuilder result;
+
+            uassertStatusOK(
+                dropCollection(opCtx,
+                               ns(),
+                               result,
+                               DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
+
+            // Delete entries in config.cache.collections
+
+            // Delete entries in config.rangeDeletions
+
+            // Delete csr entries
+            {
+                AutoGetCollection db(opCtx, ns(), MODE_IS);
+                auto* csr = CollectionShardingRuntime::get(opCtx, ns());
+                csr->clearFilteringMetadata(opCtx);
+            }
+
+            logd("JAUME: collection dropped on participant");
+
+            return Response::parse(
+                IDLParserErrorContext("_shardsvrDropCollectionParticipant-reply"), result.done());
         }
 
         bool supportsWriteConcern() const override {
@@ -110,7 +123,7 @@ public:
             return request().getNamespace();
         }
     };
-} sharsvrdDropCollectionCommand;
+} sharsvrdDropCollectionParticipantCommand;
 
 }  // namespace
 }  // namespace mongo
